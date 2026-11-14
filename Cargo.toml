@@ -30,7 +30,7 @@ mac_address = "1.1.5"
 whoami = "1.2"
 base64 = "0.13"
 axum = { version = "0.5", features = ["headers"] }
-sqlx = { version = "0.6", default-features = false, features = [ "runtime-tokio-rustls", "sqlite", "chrono", "json" ] }
+sqlx = { package = "sqlx-core", version = "0.6", default-features = false, features = [ "runtime-tokio-rustls", "sqlite", "chrono", "json" ] }
 deadpool = "0.8"
 async-trait = "0.1"
 async-speed-limit = { git = "https://github.com/open-trade/async-speed-limit" }
@@ -67,7 +67,9 @@ native-tls = { version = "0.2", features = ["vendored"] }
 
 [build-dependencies]
 hbb_common = { path = "libs/hbb_common" }
-# hbb_common 也会作为构建依赖编译，确保交叉编译时主机侧 OpenSSL 使用 vendored。
+
+[target.'cfg(target_os = "linux")'.build-dependencies]
+# hbb_common 也会作为构建依赖编译，确保 Linux 交叉编译时主机侧 OpenSSL 使用 vendored。
 native-tls = { version = "0.2", features = ["vendored"] }
 
 [workspace]

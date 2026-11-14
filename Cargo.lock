@@ -1091,12 +1091,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dotenv"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77c90badedccf4105eca100756a0b1289e191f6fcbdadd3cee1d2f614f97da8f"
-
-[[package]]
 name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1712,7 +1706,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "sodiumoxide",
- "sqlx",
+ "sqlx-core",
  "tempfile",
  "tokio-tungstenite 0.29.0",
  "tower-http",
@@ -1744,15 +1738,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7f66481bfee273957b1f20485a4ff3362987f85b2c236580d81b4eb7a326429"
 dependencies = [
  "http 0.2.7",
-]
-
-[[package]]
-name = "heck"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2540771e65fc8cb83cd6e8a237f70c319bd5c29f78ed1084ba5d50eeac86f7f9"
-dependencies = [
- "unicode-segmentation",
 ]
 
 [[package]]
@@ -3987,16 +3972,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sqlx"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f82cbe94f41641d6c410ded25bbf5097c240cefdf8e3b06d04198d0a96af6a4"
-dependencies = [
- "sqlx-core",
- "sqlx-macros",
-]
-
-[[package]]
 name = "sqlx-core"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4040,25 +4015,6 @@ dependencies = [
  "tokio-stream",
  "url",
  "webpki-roots 0.22.4",
-]
-
-[[package]]
-name = "sqlx-macros"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f40c63177cf23d356b159b60acd27c54af7423f1736988502e36bae9a712118f"
-dependencies = [
- "dotenv",
- "either",
- "heck",
- "once_cell",
- "proc-macro2 1.0.93",
- "quote 1.0.47",
- "serde_json",
- "sqlx-core",
- "sqlx-rt",
- "syn 1.0.93",
- "url",
 ]
 
 [[package]]
@@ -4747,12 +4703,6 @@ checksum = "d54590932941a9e9266f0832deed84ebe1bf2e4c9e4a3554d393d18f5e854bf9"
 dependencies = [
  "tinyvec",
 ]
-
-[[package]]
-name = "unicode-segmentation"
-version = "1.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e8820f5d777f6224dc4be3632222971ac30164d4a258d595640799554ebfd99"
 
 [[package]]
 name = "unicode-width"
