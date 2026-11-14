@@ -61,8 +61,8 @@ jobs:
           if-no-files-found: error
 
   build-windows:
-    name: Windows x86_64 binaries
-    runs-on: windows-2022
+    name: Windows x86_64 GNU binaries
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -75,22 +75,22 @@ jobs:
           toolchain: stable
           profile: minimal
           override: true
-          target: x86_64-pc-windows-msvc
+          target: x86_64-pc-windows-gnu
 
       - name: Build Windows server
         uses: actions-rs/cargo@v1
         with:
           use-cross: true
           command: build
-          args: --locked --release --all-features --target=x86_64-pc-windows-msvc
+          args: --locked --release --all-features --target=x86_64-pc-windows-gnu
 
       - name: Package Windows server
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item target/x86_64-pc-windows-msvc/release/hbbs.exe dist/hbbs.exe
-          Copy-Item target/x86_64-pc-windows-msvc/release/hbbr.exe dist/hbbr.exe
-          Copy-Item target/x86_64-pc-windows-msvc/release/rustdesk-utils.exe dist/rustdesk-utils.exe
+          Copy-Item target/x86_64-pc-windows-gnu/release/hbbs.exe dist/hbbs.exe
+          Copy-Item target/x86_64-pc-windows-gnu/release/hbbr.exe dist/hbbr.exe
+          Copy-Item target/x86_64-pc-windows-gnu/release/rustdesk-utils.exe dist/rustdesk-utils.exe
           Compress-Archive -Path dist/* -DestinationPath rustdesk-server-windows-x86_64-unsigned.zip -Force
 
       - name: Upload Windows server
@@ -131,6 +131,54 @@ jobs:
         with:
           name: rustdesk-server-linux-${{ matrix.job.name }}
           path: rustdesk-server-linux-${{ matrix.job.name }}.zip
+          if-no-files-found: error
+
+  package-debian:
+    name: Debian package ${{ matrix.job.name }}
+    needs: build-linux
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { name: amd64, debian_platform: amd64, crossbuild_package: '' }
+          - { name: arm64v8, debian_platform: arm64, crossbuild_package: crossbuild-essential-arm64 }
+          - { name: armv7, debian_platform: armhf, crossbuild_package: crossbuild-essential-armhf }
+          - { name: i386, debian_platform: i386, crossbuild_package: crossbuild-essential-i386 }
+    steps:
+      - name: Checkout packaging files
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Create packaging environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y devscripts build-essential debhelper pkg-config ${{ matrix.job.crossbuild_package }}
+          mkdir -p debian-build/${{ matrix.job.name }}/bin
+
+      - name: Download Linux binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: ultrapro-server-linux-${{ matrix.job.name }}
+          path: debian-build/${{ matrix.job.name }}/bin
+
+      - name: Build Debian packages
+        run: |
+          chmod 0755 debian-build/${{ matrix.job.name }}/bin/*
+          cp -R debian systemd debian-build/${{ matrix.job.name }}/
+          sed 's/{{ ARCH }}/${{ matrix.job.debian_platform }}/' debian/control.tpl > debian-build/${{ matrix.job.name }}/debian/control
+          cd debian-build/${{ matrix.job.name }}
+          debuild -i -us -uc -b -a${{ matrix.job.debian_platform }}
+
+      - name: Upload Debian packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-server-deb-${{ matrix.job.name }}
+          path: |
+            debian-build/rustdesk-server-hbbr_*_${{ matrix.job.debian_platform }}.deb
+            debian-build/rustdesk-server-hbbs_*_${{ matrix.job.debian_platform }}.deb
+            debian-build/rustdesk-server-utils_*_${{ matrix.job.debian_platform }}.deb
           if-no-files-found: error
 
   build-container:
