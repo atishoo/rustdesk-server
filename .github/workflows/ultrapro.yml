@@ -101,19 +101,27 @@ jobs:
           submodules: recursive
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+          target: x86_64-pc-windows-msvc
 
       - name: Build Windows server
-        shell: bash
-        run: cargo build --locked --release --all-features
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: true
+          command: build
+          args: --locked --release --all-features --target=x86_64-pc-windows-msvc
 
       - name: Package Windows server
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item target/release/hbbs.exe dist/hbbs.exe
-          Copy-Item target/release/hbbr.exe dist/hbbr.exe
-          Copy-Item target/release/rustdesk-utils.exe dist/rustdesk-utils.exe
+          Copy-Item target/x86_64-pc-windows-msvc/release/hbbs.exe dist/hbbs.exe
+          Copy-Item target/x86_64-pc-windows-msvc/release/hbbr.exe dist/hbbr.exe
+          Copy-Item target/x86_64-pc-windows-msvc/release/rustdesk-utils.exe dist/rustdesk-utils.exe
           Compress-Archive -Path dist/* -DestinationPath rustdesk-server-windows-x86_64.zip -Force
 
       - name: Upload Windows server
