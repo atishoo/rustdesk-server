@@ -67,6 +67,8 @@ native-tls = { version = "0.2", features = ["vendored"] }
 
 [build-dependencies]
 hbb_common = { path = "libs/hbb_common" }
+# hbb_common 也会作为构建依赖编译，确保交叉编译时主机侧 OpenSSL 使用 vendored。
+native-tls = { version = "0.2", features = ["vendored"] }
 
 [workspace]
 members = ["libs/hbb_common"]
