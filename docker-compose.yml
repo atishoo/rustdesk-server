@@ -13,7 +13,7 @@ services:
       - 21116:21116/udp
       - 21118:21118
     image: ${RUSTDESK_SERVER_IMAGE:-ghcr.io/atishoo/rustdesk-server:ultrapro}
-    command: hbbs -r rustdesk.example.com:21117
+    command: hbbs -r ${RUSTDESK_RELAY:-hbbr:21117}
     environment:
       ENABLE_TCP_REGISTER: ${ENABLE_TCP_REGISTER:-Y}
     volumes:
