@@ -17,33 +17,33 @@ env:
 jobs:
   build-server:
     name: Build hbbs and hbbr
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
       - name: Install Rust toolchain
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-          target: x86_64-unknown-linux-musl
           profile: minimal
           override: true
 
       - name: Build server binaries
-        uses: actions-rs/cargo@v1
-        with:
-          use-cross: true
-          command: build
-          args: --locked --release --all-features --target=x86_64-unknown-linux-musl
+        run: cargo build --locked --release --all-features
 
       - name: Prepare image binaries
         run: |
-          install -m 0755 target/x86_64-unknown-linux-musl/release/hbbs docker/rootfs/usr/bin/hbbs
-          install -m 0755 target/x86_64-unknown-linux-musl/release/hbbr docker/rootfs/usr/bin/hbbr
-          install -m 0755 target/x86_64-unknown-linux-musl/release/rustdesk-utils docker/rootfs/usr/bin/rustdesk-utils
+          install -m 0755 target/release/hbbs docker/rootfs/usr/bin/hbbs
+          install -m 0755 target/release/hbbr docker/rootfs/usr/bin/hbbr
+          install -m 0755 target/release/rustdesk-utils docker/rootfs/usr/bin/rustdesk-utils
 
       - name: Upload server binaries
         uses: actions/upload-artifact@v4
@@ -55,7 +55,7 @@ jobs:
   publish-container:
     name: Publish amd64 container
     needs: build-server
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -82,7 +82,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ./docker
-          file: ./docker/Dockerfile
+          file: ./docker/Dockerfile.ultrapro
           platforms: linux/amd64
           push: true
           provenance: false
@@ -90,3 +90,35 @@ jobs:
           tags: |
             ${{ env.SERVER_IMAGE }}:ultrapro
             ${{ env.SERVER_IMAGE }}:${{ github.sha }}
+
+  build-windows-server:
+    name: Windows server binaries
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Windows server
+        shell: bash
+        run: cargo build --locked --release --all-features
+
+      - name: Package Windows server
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/hbbs.exe dist/hbbs.exe
+          Copy-Item target/release/hbbr.exe dist/hbbr.exe
+          Copy-Item target/release/rustdesk-utils.exe dist/rustdesk-utils.exe
+          Compress-Archive -Path dist/* -DestinationPath rustdesk-server-windows-x86_64.zip -Force
+
+      - name: Upload Windows server
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-server-windows-x86_64
+          path: rustdesk-server-windows-x86_64.zip
+          if-no-files-found: error
