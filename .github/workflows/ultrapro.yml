@@ -1,4 +1,4 @@
-name: UltraPro server
+name: UltraPro server release
 
 on:
   push:
@@ -15,19 +15,22 @@ env:
   SERVER_IMAGE: ghcr.io/${{ github.repository_owner }}/rustdesk-server
 
 jobs:
-  build-server:
-    name: Build hbbs and hbbr
+  build-linux:
+    name: Linux ${{ matrix.job.name }} binaries
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { name: amd64, target: x86_64-unknown-linux-musl, s6: x86_64 }
+          - { name: arm64v8, target: aarch64-unknown-linux-musl, s6: aarch64 }
+          - { name: armv7, target: armv7-unknown-linux-musleabihf, s6: armhf }
+          - { name: i386, target: i686-unknown-linux-musl, s6: i686 }
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
 
       - name: Install Rust toolchain
         uses: actions-rs/toolchain@v1
@@ -35,64 +38,30 @@ jobs:
           toolchain: stable
           profile: minimal
           override: true
+          target: ${{ matrix.job.target }}
 
-      - name: Build server binaries
-        run: cargo build --locked --release --all-features
+      - name: Build Linux server
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: true
+          command: build
+          args: --locked --release --all-features --target=${{ matrix.job.target }}
 
-      - name: Prepare image binaries
-        run: |
-          install -m 0755 target/release/hbbs docker/rootfs/usr/bin/hbbs
-          install -m 0755 target/release/hbbr docker/rootfs/usr/bin/hbbr
-          install -m 0755 target/release/rustdesk-utils docker/rootfs/usr/bin/rustdesk-utils
+      - name: Make binaries executable
+        run: chmod 0755 target/${{ matrix.job.target }}/release/hbbs target/${{ matrix.job.target }}/release/hbbr target/${{ matrix.job.target }}/release/rustdesk-utils
 
-      - name: Upload server binaries
+      - name: Upload Linux binaries
         uses: actions/upload-artifact@v4
         with:
-          name: ultrapro-server-binaries
-          path: docker/rootfs/usr/bin
+          name: ultrapro-server-linux-${{ matrix.job.name }}
+          path: |
+            target/${{ matrix.job.target }}/release/hbbs
+            target/${{ matrix.job.target }}/release/hbbr
+            target/${{ matrix.job.target }}/release/rustdesk-utils
           if-no-files-found: error
 
-  publish-container:
-    name: Publish amd64 container
-    needs: build-server
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Download server binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: ultrapro-server-binaries
-          path: docker/rootfs/usr/bin
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push container
-        uses: docker/build-push-action@v6
-        with:
-          context: ./docker
-          file: ./docker/Dockerfile.ultrapro
-          platforms: linux/amd64
-          push: true
-          provenance: false
-          build-args: S6_ARCH=x86_64
-          tags: |
-            ${{ env.SERVER_IMAGE }}:ultrapro
-            ${{ env.SERVER_IMAGE }}:${{ github.sha }}
-
-  build-windows-server:
-    name: Windows server binaries
+  build-windows:
+    name: Windows x86_64 binaries
     runs-on: windows-2022
     steps:
       - name: Checkout
@@ -122,11 +91,127 @@ jobs:
           Copy-Item target/x86_64-pc-windows-msvc/release/hbbs.exe dist/hbbs.exe
           Copy-Item target/x86_64-pc-windows-msvc/release/hbbr.exe dist/hbbr.exe
           Copy-Item target/x86_64-pc-windows-msvc/release/rustdesk-utils.exe dist/rustdesk-utils.exe
-          Compress-Archive -Path dist/* -DestinationPath rustdesk-server-windows-x86_64.zip -Force
+          Compress-Archive -Path dist/* -DestinationPath rustdesk-server-windows-x86_64-unsigned.zip -Force
 
       - name: Upload Windows server
         uses: actions/upload-artifact@v4
         with:
-          name: rustdesk-server-windows-x86_64
-          path: rustdesk-server-windows-x86_64.zip
+          name: rustdesk-server-windows-x86_64-unsigned
+          path: rustdesk-server-windows-x86_64-unsigned.zip
           if-no-files-found: error
+
+  package-linux:
+    name: Package Linux ${{ matrix.job.name }}
+    needs: build-linux
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { name: amd64, arch: amd64 }
+          - { name: arm64v8, arch: arm64 }
+          - { name: armv7, arch: armhf }
+          - { name: i386, arch: i386 }
+    steps:
+      - name: Download Linux binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: ultrapro-server-linux-${{ matrix.job.name }}
+          path: dist
+
+      - name: Package Linux server
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip
+          chmod 0755 dist/*
+          zip -j rustdesk-server-linux-${{ matrix.job.name }}.zip dist/*
+
+      - name: Upload Linux package
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-server-linux-${{ matrix.job.name }}
+          path: rustdesk-server-linux-${{ matrix.job.name }}.zip
+          if-no-files-found: error
+
+  build-container:
+    name: Container ${{ matrix.job.name }}
+    needs: build-linux
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { name: amd64, platform: linux/amd64, s6: x86_64 }
+          - { name: arm64v8, platform: linux/arm64, s6: aarch64 }
+          - { name: armv7, platform: linux/arm/v7, s6: armhf }
+          - { name: i386, platform: linux/386, s6: i686 }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download Linux binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: ultrapro-server-linux-${{ matrix.job.name }}
+          path: docker/rootfs/usr/bin
+
+      - name: Make binaries executable
+        run: chmod 0755 docker/rootfs/usr/bin/*
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push architecture image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker
+          file: ./docker/Dockerfile.ultrapro
+          platforms: ${{ matrix.job.platform }}
+          push: true
+          provenance: false
+          build-args: S6_ARCH=${{ matrix.job.s6 }}
+          tags: |
+            ${{ env.SERVER_IMAGE }}:ultrapro-${{ matrix.job.name }}
+            ${{ env.SERVER_IMAGE }}:${{ github.sha }}-${{ matrix.job.name }}
+
+  publish-container-manifest:
+    name: Publish multi-architecture container
+    needs: build-container
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish ultrapro manifests
+        run: |
+          docker buildx imagetools create \
+            --tag "${SERVER_IMAGE}:ultrapro" \
+            "${SERVER_IMAGE}:ultrapro-amd64" \
+            "${SERVER_IMAGE}:ultrapro-arm64v8" \
+            "${SERVER_IMAGE}:ultrapro-armv7" \
+            "${SERVER_IMAGE}:ultrapro-i386"
+          docker buildx imagetools create \
+            --tag "${SERVER_IMAGE}:${GITHUB_SHA}" \
+            "${SERVER_IMAGE}:${GITHUB_SHA}-amd64" \
+            "${SERVER_IMAGE}:${GITHUB_SHA}-arm64v8" \
+            "${SERVER_IMAGE}:${GITHUB_SHA}-armv7" \
+            "${SERVER_IMAGE}:${GITHUB_SHA}-i386"
