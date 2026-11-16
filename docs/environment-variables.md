@@ -46,6 +46,9 @@ in the inherited process environment.
 | *(config file)* | `-c`, `--config` | *(none)* | Path to an extra INI config file (see precedence above). |
 | `TEST_HBBS` 🅴 | *(none)* | *(auto)* | UDP self‑test target checked at start‑up. Set to `no` to skip the check (useful behind some NATs/proxies), or to an explicit `host:port`. |
 | `ALWAYS_USE_RELAY` 🅴 | *(none)* | `N` | `Y` forces every session through a relay (disables direct/hole‑punched connections). At runtime, send `always-use-relay Y` or `always-use-relay N` to the `hbbs` [loopback console](#runtime-console). |
+| `MUST_LOGIN` 🅴 | `--must-login=Y|N` | `N` | `Y` requires a non-empty client login token before a punch-hole request is accepted. If `RUSTDESK_API_JWT_KEY` is set, the token must also be a valid API JWT. At runtime, send `must-login Y` or `must-login N` to the `hbbs` loopback console. |
+| `RUSTDESK_API_JWT_KEY` 🅴 | *(none)* | *(empty)* | Shared HS256 secret used to validate login tokens when `MUST_LOGIN=Y`. Leave empty when the API does not issue JWT tokens. |
+| `ENABLE_TCP_REGISTER` 🅴 | *(none)* | `N` | `Y` enables persistent TCP peer registration and lets UltraPro route punch-hole requests through the registered TCP channel when UDP is unavailable. |
 | `DB_URL` 🅴 | *(none)* | `./db_v2.sqlite3` | Path/URL of the SQLite database file. See [Database](#database). |
 | `MAX_DATABASE_CONNECTIONS` 🅴 | *(none)* | `1` | Size of the SQLite connection pool. |
 | `MAX_PUNCH_REQUESTS` 🅴 | *(none)* | `100000` | Number of punch-request records kept in memory for the `punch-requests` [console](#runtime-console) command; the oldest is dropped when full. `0` disables recording. |

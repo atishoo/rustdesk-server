@@ -16,6 +16,8 @@ services:
     command: hbbs -r ${RUSTDESK_RELAY:-hbbr:21117}
     environment:
       ENABLE_TCP_REGISTER: ${ENABLE_TCP_REGISTER:-Y}
+      MUST_LOGIN: ${MUST_LOGIN:-N}
+      RUSTDESK_API_JWT_KEY: ${RUSTDESK_API_JWT_KEY:-}
     volumes:
       - ./data:/root
     networks:

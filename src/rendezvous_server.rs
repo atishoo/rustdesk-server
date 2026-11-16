@@ -1,4 +1,5 @@
 use crate::common::*;
+use crate::jwt;
 use crate::peer::*;
 use hbb_common::{
     allow_err, bail,
@@ -60,6 +61,7 @@ static ROTATION_RELAY_SERVER: AtomicUsize = AtomicUsize::new(0);
 type RelayServers = Vec<String>;
 const CHECK_RELAY_TIMEOUT: u64 = 3_000;
 static ALWAYS_USE_RELAY: AtomicBool = AtomicBool::new(false);
+static MUST_LOGIN: AtomicBool = AtomicBool::new(false);
 const MAX_RELAY_UUID_LEN: usize = 128;
 
 fn tcp_register_enabled() -> bool {
@@ -243,6 +245,21 @@ impl RendezvousServer {
         log::info!(
             "ALWAYS_USE_RELAY={}",
             if ALWAYS_USE_RELAY.load(Ordering::SeqCst) {
+                "Y"
+            } else {
+                "N"
+            }
+        );
+        let must_login = get_arg("must-login");
+        let must_login_enabled = must_login.eq_ignore_ascii_case("Y")
+            || (must_login.is_empty()
+                && std::env::var("MUST_LOGIN")
+                    .unwrap_or_default()
+                    .eq_ignore_ascii_case("Y"));
+        MUST_LOGIN.store(must_login_enabled, Ordering::SeqCst);
+        log::info!(
+            "MUST_LOGIN={}",
+            if MUST_LOGIN.load(Ordering::SeqCst) {
                 "Y"
             } else {
                 "N"
@@ -880,6 +897,24 @@ impl RendezvousServer {
             });
             return Ok((msg_out, None));
         }
+        if MUST_LOGIN.load(Ordering::SeqCst) {
+            if ph.token.is_empty() {
+                let mut msg_out = RendezvousMessage::new();
+                msg_out.set_punch_hole_response(PunchHoleResponse {
+                    other_failure: "Connection failed, please login!".to_owned(),
+                    ..Default::default()
+                });
+                return Ok((msg_out, None));
+            }
+            if !jwt::SECRET.is_empty() && jwt::verify_token(&ph.token).is_err() {
+                let mut msg_out = RendezvousMessage::new();
+                msg_out.set_punch_hole_response(PunchHoleResponse {
+                    other_failure: "Token error, please log out and log back in!".to_owned(),
+                    ..Default::default()
+                });
+                return Ok((msg_out, None));
+            }
+        }
         let id = ph.id;
         // punch hole request from A, relay to B,
         // check if in same intranet first,
@@ -1131,13 +1166,14 @@ impl RendezvousServer {
         match fds.next() {
             Some("h") => {
                 res = format!(
-                    "{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+                    "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
                     "relay-servers(rs) <separated by ,>",
                     "reload-geo(rg)",
                     "ip-blocker(ib) [<ip>|<number>] [-]",
                     "ip-changes(ic) [<id>|<number>] [-]",
                     "punch-requests(pr) [<number>] [-]",
                     "always-use-relay(aur)",
+                    "must-login(ml) [Y|N]",
                     "test-geo(tg) <ip1> <ip2>"
                 )
             }
@@ -1267,6 +1303,17 @@ impl RendezvousServer {
                         res,
                         "ALWAYS_USE_RELAY: {:?}",
                         ALWAYS_USE_RELAY.load(Ordering::SeqCst)
+                    );
+                }
+            }
+            Some("must-login" | "ml") => {
+                if let Some(value) = fds.next() {
+                    MUST_LOGIN.store(value.eq_ignore_ascii_case("Y"), Ordering::SeqCst);
+                } else {
+                    let _ = writeln!(
+                        res,
+                        "MUST_LOGIN: {:?}",
+                        MUST_LOGIN.load(Ordering::SeqCst)
                     );
                 }
             }
