@@ -102,23 +102,61 @@ These may also be placed in `.env` using the uppercase spellings shown above
 * **`blocklist.txt`** — IPs that are **refused** outright.
 
 Both can also be edited live through the `hbbr` loopback console (`ba`/`br`,
-`Ba`/`Br`).
+`Ba`/`Br`). File entries and command arguments use the same IP representation.
+IPv6 spelling variants match the same address. IPv4-mapped and IPv4-compatible
+IPv6 entries match their corresponding IPv4 address. IPv6 loopback stays IPv6.
 
 ### Runtime console
 
-The runtime consoles are TCP command transports built into the services; they
-are not `rustdesk-utils` commands or interactive standard-input consoles. A
-connection from a loopback address is treated as a single console command:
+The services accept one runtime command per loopback TCP connection. Close the
+connection's write side after sending the command, then read its reply.
 
 ```bash
-# hbbs: toggle forced relay on PORT-1 (21115 by default)
-printf 'always-use-relay Y' | nc 127.0.0.1 21115
+python3 - <<'PY'
+import socket
 
-# hbbr: list commands on its relay PORT (21117 by default)
-printf 'h' | nc 127.0.0.1 21117
+for port, command in [(21115, b"always-use-relay Y"), (21117, b"h")]:
+    with socket.create_connection(("127.0.0.1", port), timeout=3) as conn:
+        conn.sendall(command)
+        conn.shutdown(socket.SHUT_WR)
+        print(conn.makefile().read(), end="")
+PY
 ```
 
 Use the corresponding configured ports if you changed `PORT`.
+
+The `hbbs` command `rs` returns the complete configured relay list. Startup
+retains valid hostnames even if DNS is temporarily unavailable.
+`rs host1,host2:21117` replaces the list and
+returns the applied addresses, one per line. Specify an IPv6 address with
+brackets and a port, such as `[2001:db8::1]:21117`. If any address or port has
+invalid syntax, the whole update fails and the previous list is kept. DNS
+resolution and reachability checks run after the configuration is applied.
+
+Use `rs -` to clear the runtime override and let clients derive the relay
+address. Clearing it, or querying an empty list with `rs`, returns
+`RELAY_SERVERS: default`. The runtime override is reset from `RELAY-SERVERS`
+when `hbbs` restarts. Reachability checks run separately from the configured
+list, with one batch at a time and up to eight concurrent checks. Configuring
+a new list starts a fresh batch. Each address has a three-second deadline,
+including DNS and connections to its resolved addresses. Pending DNS calls
+keep their resolver slots until they finish. Ports for the same hostname share
+the DNS result within a batch. Configuration changes reuse pending lookups
+and their original DNS deadlines. Numeric addresses
+can still be checked while those calls are outstanding. Deferred hostnames
+keep their previous availability and are checked first in the next batch. Probes also
+check single-address lists. Results update relay selection as each probe
+finishes. When at least one relay responds, `hbbs` selects from those
+responders. If none responds, `hbbs` keeps advertising the
+configured addresses because external clients may have different routes.
+An empty configuration lets clients derive the default relay address. Resolved IPs
+use up to four concurrent attempts per relay. Attempts are staggered by up to
+200 ms while earlier connections are pending, with time reserved for later
+candidates when the DNS answer contains more than four addresses. The first
+candidate rotates through a stable address order until one responds. The last
+responder gets the first attempt while it remains in DNS. After two consecutive
+failures, candidate rotation resumes. A relay advances its rotation only when
+its probe starts a connection attempt.
 
 ---
 
@@ -187,7 +225,7 @@ by `hbbs`/`hbbr` directly:
 
 | Variable | Default | Description |
 |---|---|---|
-| `RELAY` | `relay.example.com` | Passed to `hbbs` as `-r $RELAY` (your public address). |
+| `RELAY` | *(empty)* | Optional public relay address or comma-separated list. When empty, clients derive the relay from the ID Server. |
 | `ENCRYPTED_ONLY` | `0` | `1` adds `-k _` to both servers. This is redundant for `hbbs`, whose default is `-`, and opts `hbbr` into key validation instead of its intentional empty default. |
 | `KEY_PUB` | *(unset)* | If set, written to `/data/id_ed25519.pub` on first start. |
 | `KEY_PRIV` | *(unset)* | If set, written to `/data/id_ed25519` on first start. Provide **both** `KEY_PUB` and `KEY_PRIV`, or neither. |

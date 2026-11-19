@@ -6,10 +6,10 @@ use hbb_common::{
     bytes::{Bytes, BytesMut},
     bytes_codec::BytesCodec,
     config,
-    futures::future::join_all,
     futures_util::{
+        future::{AbortHandle, Abortable},
         sink::SinkExt,
-        stream::StreamExt,
+        stream::{self, FuturesUnordered, StreamExt},
     },
     log,
     protobuf::{Message as _, MessageField},
@@ -21,10 +21,10 @@ use hbb_common::{
     timeout,
     tokio::{
         self,
-        io::{AsyncReadExt, AsyncWriteExt},
+        io::AsyncWriteExt,
         net::{TcpListener, TcpStream},
-        sync::{mpsc, Mutex},
-        time::{interval, Duration},
+        sync::{mpsc, watch, Mutex, Notify},
+        time::{interval, Duration, MissedTickBehavior},
     },
     tokio_util::codec::Framed,
     try_into_v4,
@@ -37,15 +37,13 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex, RwLock},
     time::Instant,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 enum Data {
     Msg(Box<RendezvousMessage>, SocketAddr),
-    RelayServers0(String),
-    RelayServers(RelayServers),
 }
 
 enum PeerTarget {
@@ -60,9 +58,54 @@ type Receiver = mpsc::UnboundedReceiver<Data>;
 static ROTATION_RELAY_SERVER: AtomicUsize = AtomicUsize::new(0);
 type RelayServers = Vec<String>;
 const CHECK_RELAY_TIMEOUT: u64 = 3_000;
+const CHECK_RELAY_CONCURRENCY: usize = 8;
+const RELAY_CANDIDATE_CONCURRENCY: usize = 4;
+const RELAY_CANDIDATE_DELAY: Duration = Duration::from_millis(200);
 static ALWAYS_USE_RELAY: AtomicBool = AtomicBool::new(false);
 static MUST_LOGIN: AtomicBool = AtomicBool::new(false);
 const MAX_RELAY_UUID_LEN: usize = 128;
+
+fn validate_relay_address(address: &str) -> Result<(), &'static str> {
+    if let Ok(socket) = address.parse::<SocketAddr>() {
+        return if socket.port() == 0 {
+            Err("Invalid relay server port")
+        } else {
+            Ok(())
+        };
+    }
+    if address.parse::<Ipv4Addr>().is_ok() {
+        return Ok(());
+    }
+    let hostname = match address.split_once(':') {
+        Some((hostname, port)) => {
+            if !port.bytes().all(|byte| byte.is_ascii_digit())
+                || !port.parse::<u16>().is_ok_and(|port| port != 0)
+            {
+                return Err("Invalid relay server port");
+            }
+            hostname
+        }
+        None => address,
+    };
+    let hostname = hostname.strip_suffix('.').unwrap_or(hostname);
+    if hostname.split('.').count() == 4
+        && hostname.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
+        return Err("Invalid relay server IP address");
+    }
+    if hostname.len() > 253
+        || hostname.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+    {
+        return Err("Invalid relay server list");
+    }
+    Ok(())
+}
 
 fn tcp_register_enabled() -> bool {
     matches!(
@@ -147,6 +190,86 @@ struct Inner {
     sk: Option<sign::SecretKey>,
 }
 
+#[derive(Default)]
+struct RelayState {
+    configured: Arc<RelayServers>,
+    available: Vec<usize>,
+    health: Vec<RelayHealth>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct RelayHealth {
+    last_reply: Option<RelayReply>,
+    next_candidate: usize,
+}
+
+#[derive(Clone, Copy)]
+struct RelayReply {
+    socket: SocketAddr,
+    failures: u8,
+}
+
+impl RelayState {
+    fn set(&mut self, servers: RelayServers) -> Arc<RelayServers> {
+        let previous: HashMap<_, _> = self
+            .health
+            .iter()
+            .enumerate()
+            .map(|(index, &health)| {
+                let available = self.available.binary_search(&index).is_ok();
+                (
+                    relay_probe_endpoint(&self.configured[index]),
+                    (available, health),
+                )
+            })
+            .collect();
+        self.available.clear();
+        self.health.clear();
+        for (index, server) in servers.iter().enumerate() {
+            let (available, health) = previous
+                .get(&relay_probe_endpoint(server))
+                .copied()
+                .unwrap_or_default();
+            self.health.push(health);
+            if available {
+                self.available.push(index);
+            }
+        }
+        let servers = Arc::new(servers);
+        self.configured = servers.clone();
+        servers
+    }
+
+    fn record_probe(&mut self, index: usize, probe: RelayProbe) {
+        let available = self.available.binary_search(&index);
+        let health = &mut self.health[index];
+        if matches!(probe, RelayProbe::Reachable(_) | RelayProbe::Failed) {
+            health.next_candidate = health.next_candidate.wrapping_add(1);
+        }
+        match probe {
+            RelayProbe::Reachable(socket) => {
+                health.last_reply = Some(RelayReply {
+                    socket,
+                    failures: 0,
+                });
+                if let Err(position) = available {
+                    self.available.insert(position, index);
+                }
+            }
+            RelayProbe::Failed | RelayProbe::Unresolved => {
+                // Retain the last responding IP as a hint for recovery.
+                if let Some(reply) = health.last_reply.as_mut() {
+                    reply.failures = reply.failures.saturating_add(1);
+                }
+                if let Ok(position) = available {
+                    self.available.remove(position);
+                }
+            }
+            RelayProbe::Deferred => {}
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct RendezvousServer {
     tcp_punch: Arc<Mutex<HashMap<SocketAddr, TcpSender>>>,
@@ -154,8 +277,8 @@ pub struct RendezvousServer {
     tcp_peer_ids: Arc<Mutex<HashSet<String>>>,
     pm: PeerMap,
     tx: Sender,
-    relay_servers: Arc<RelayServers>,
-    relay_servers0: Arc<RelayServers>,
+    relays: Arc<RwLock<RelayState>>,
+    relay_changed: Arc<Notify>,
     rendezvous_servers: Arc<Vec<String>>,
     inner: Arc<Inner>,
 }
@@ -173,8 +296,23 @@ impl RendezvousServer {
         Self::start_with_bind(None, port, serial, key, rmem)
     }
 
-    #[tokio::main(flavor = "multi_thread")]
-    pub async fn start_with_bind(
+    pub fn start_with_bind(
+        bind_addr: Option<IpAddr>,
+        port: i32,
+        serial: i32,
+        key: &str,
+        rmem: usize,
+    ) -> ResultType<()> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let result = runtime.block_on(Self::run(bind_addr, port, serial, key, rmem));
+        // Blocking system DNS cannot be canceled. Do not wait indefinitely during shutdown.
+        runtime.shutdown_timeout(Duration::from_secs(1));
+        result
+    }
+
+    async fn run(
         bind_addr: Option<IpAddr>,
         port: i32,
         serial: i32,
@@ -211,8 +349,8 @@ impl RendezvousServer {
             tcp_peer_ids: Arc::new(Mutex::new(HashSet::new())),
             pm,
             tx: tx.clone(),
-            relay_servers: Default::default(),
-            relay_servers0: Default::default(),
+            relays: Default::default(),
+            relay_changed: Default::default(),
             rendezvous_servers: Arc::new(rendezvous_servers),
             inner: Arc::new(Inner {
                 serial,
@@ -226,7 +364,19 @@ impl RendezvousServer {
         log::info!("mask: {:?}", rs.inner.mask);
         log::info!("local-ip: {:?}", rs.inner.local_ip);
         std::env::set_var("PORT_FOR_API", port.to_string());
-        rs.parse_relay_servers(&get_arg("relay-servers"));
+        let relays: RelayServers = get_arg("relay-servers")
+            .split(',')
+            .filter(|address| !address.is_empty())
+            .filter_map(|address| match validate_relay_address(address) {
+                Ok(_) => Some(address.to_owned()),
+                Err(err) => {
+                    log::warn!("{err}: {address}");
+                    None
+                }
+            })
+            .collect();
+        log::info!("relay-servers={:?}", relays);
+        rs.relays.write().unwrap().set(relays);
         let mut listener = create_tcp_listener(bind_addr, port).await?;
         let mut listener2 = create_tcp_listener(bind_addr, nat_port).await?;
         let mut listener3 = create_tcp_listener(bind_addr, ws_port).await?;
@@ -287,6 +437,10 @@ impl RendezvousServer {
                 }
             });
         };
+        tokio::spawn(check_relay_servers_periodically(
+            rs.relays.clone(),
+            rs.relay_changed.clone(),
+        ));
         let main_task = async move {
             loop {
                 log::info!("Start");
@@ -342,23 +496,11 @@ impl RendezvousServer {
         socket: &mut FramedSocket,
         key: &str,
     ) -> LoopFailure {
-        let mut timer_check_relay = interval(Duration::from_millis(CHECK_RELAY_TIMEOUT));
         loop {
             tokio::select! {
-                _ = timer_check_relay.tick() => {
-                    if self.relay_servers0.len() > 1 {
-                        let rs = self.relay_servers0.clone();
-                        let tx = self.tx.clone();
-                        tokio::spawn(async move {
-                            check_relay_servers(rs, tx).await;
-                        });
-                    }
-                }
                 Some(data) = rx.recv() => {
                     match data {
                         Data::Msg(msg, addr) => { allow_err!(socket.send(msg.as_ref(), addr).await); }
-                        Data::RelayServers0(rs) => { self.parse_relay_servers(&rs); }
-                        Data::RelayServers(rs) => { self.relay_servers = Arc::new(rs); }
                     }
                 }
                 res = socket.next() => {
@@ -561,6 +703,7 @@ impl RendezvousServer {
                     if self.pm.get_in_memory(&target_id).await.is_some() {
                         let mut msg_out = RendezvousMessage::new();
                         rf.socket_addr = AddrMangle::encode(addr).into();
+                        rf.token.clear();
                         msg_out.set_request_relay(rf);
                         self.send_to_peer(&target_id, msg_out).await;
                     }
@@ -1142,20 +1285,38 @@ impl RendezvousServer {
         true
     }
 
-    fn parse_relay_servers(&mut self, relay_servers: &str) {
-        let rs = get_servers(relay_servers, "relay-servers");
-        self.relay_servers0 = Arc::new(rs);
-        self.relay_servers = self.relay_servers0.clone();
+    fn get_relay_server(&self, _pa: IpAddr, _pb: IpAddr) -> String {
+        let relays = self.relays.read().unwrap();
+        // A public relay can be reachable by clients without being reachable from this host.
+        let count = if relays.available.is_empty() {
+            relays.configured.len()
+        } else {
+            relays.available.len()
+        };
+        let position = match count {
+            0 => return String::new(),
+            1 => 0,
+            _ => ROTATION_RELAY_SERVER.fetch_add(1, Ordering::SeqCst) % count,
+        };
+        let index = relays.available.get(position).copied().unwrap_or(position);
+        relays.configured[index].clone()
     }
 
-    fn get_relay_server(&self, _pa: IpAddr, _pb: IpAddr) -> String {
-        if self.relay_servers.is_empty() {
-            return "".to_owned();
-        } else if self.relay_servers.len() == 1 {
-            return self.relay_servers[0].clone();
+    fn update_relay_servers(&self, input: &str) -> Result<Arc<RelayServers>, &'static str> {
+        let mut servers = Vec::new();
+        if input != "-" {
+            for address in input.split(',') {
+                validate_relay_address(address)?;
+                servers.push(address.to_owned());
+            }
         }
-        let i = ROTATION_RELAY_SERVER.fetch_add(1, Ordering::SeqCst) % self.relay_servers.len();
-        self.relay_servers[i].clone()
+        let mut relays = self.relays.write().unwrap();
+        if relays.configured.as_ref() == &servers {
+            return Ok(relays.configured.clone());
+        }
+        let configured = relays.set(servers);
+        self.relay_changed.notify_one();
+        Ok(configured)
     }
 
     async fn check_cmd(&self, cmd: &str) -> String {
@@ -1167,7 +1328,7 @@ impl RendezvousServer {
             Some("h") => {
                 res = format!(
                     "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
-                    "relay-servers(rs) <separated by ,>",
+                    "relay-servers(rs) [<separated by ,>|-]",
                     "reload-geo(rg)",
                     "ip-blocker(ib) [<ip>|<number>] [-]",
                     "ip-changes(ic) [<id>|<number>] [-]",
@@ -1178,12 +1339,22 @@ impl RendezvousServer {
                 )
             }
             Some("relay-servers" | "rs") => {
-                if let Some(rs) = fds.next() {
-                    self.tx.send(Data::RelayServers0(rs.to_owned())).ok();
-                } else {
-                    for ip in self.relay_servers.iter() {
-                        let _ = writeln!(res, "{ip}");
+                let servers = if let Some(input) = fds.next() {
+                    if fds.next().is_some() {
+                        return "Error: Invalid relay server list\n".to_owned();
                     }
+                    match self.update_relay_servers(input) {
+                        Ok(servers) => servers,
+                        Err(err) => return format!("Error: {err}\n"),
+                    }
+                } else {
+                    self.relays.read().unwrap().configured.clone()
+                };
+                if servers.is_empty() {
+                    return "RELAY_SERVERS: default\n".to_owned();
+                }
+                for ip in servers.iter() {
+                    let _ = writeln!(res, "{ip}");
                 }
             }
             Some("ip-blocker" | "ib") => {
@@ -1291,13 +1462,12 @@ impl RendezvousServer {
                 }
             }
             Some("always-use-relay" | "aur") => {
-                if let Some(rs) = fds.next() {
-                    if rs.to_uppercase() == "Y" {
+                if let Some(value) = fds.next() {
+                    if value.to_uppercase() == "Y" {
                         ALWAYS_USE_RELAY.store(true, Ordering::SeqCst);
                     } else {
                         ALWAYS_USE_RELAY.store(false, Ordering::SeqCst);
                     }
-                    self.tx.send(Data::RelayServers0(rs.to_owned())).ok();
                 } else {
                     let _ = writeln!(
                         res,
@@ -1342,17 +1512,18 @@ impl RendezvousServer {
         if ip.is_loopback() {
             tokio::spawn(async move {
                 let mut stream = stream;
-                let mut buffer = [0; 1024];
-                if let Ok(Ok(n)) = timeout(1000, stream.read(&mut buffer[..])).await {
-                    if let Ok(data) = std::str::from_utf8(&buffer[..n]) {
-                        let res = rs.check_cmd(data).await;
-                        if let Err(err) = timeout(1000, stream.write_all(res.as_bytes()))
-                            .await
-                            .unwrap_or_else(|elapsed| Err(elapsed.into()))
-                        {
-                            log::warn!("Failed to send the console reply: {err}");
-                        }
-                    }
+                let Some(command) = read_console_command(&mut stream).await else {
+                    return;
+                };
+                let reply = match command {
+                    Ok(command) => rs.check_cmd(&command).await,
+                    Err(error) => format!("Error: {error}\n"),
+                };
+                if let Err(err) = timeout(1000, stream.write_all(reply.as_bytes()))
+                    .await
+                    .unwrap_or_else(|elapsed| Err(elapsed.into()))
+                {
+                    log::warn!("Failed to send the console reply: {err}");
                 }
             });
             return;
@@ -1572,30 +1743,290 @@ impl RendezvousServer {
     }
 }
 
-async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
-    let mut futs = Vec::new();
-    let rs = Arc::new(Mutex::new(Vec::new()));
-    for x in rs0.iter() {
-        let mut host = x.to_owned();
-        if !host.contains(':') {
-            host = format!("{}:{}", host, config::RELAY_PORT);
+#[derive(Clone, Copy)]
+enum RelayProbe {
+    Reachable(SocketAddr),
+    Failed,
+    Unresolved,
+    Deferred,
+}
+
+type RelayDns = HashMap<String, (tokio::time::Instant, watch::Receiver<Vec<SocketAddr>>)>;
+
+enum RelayEndpoint {
+    Socket(SocketAddr),
+    Host(String, u16),
+}
+
+async fn check_relay_servers_periodically(relays: Arc<RwLock<RelayState>>, changed: Arc<Notify>) {
+    let mut timer = interval(Duration::from_millis(CHECK_RELAY_TIMEOUT));
+    timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let pending_dns = Arc::new(StdMutex::new(RelayDns::new()));
+    let mut first = 0;
+    let mut last_configured = None;
+    loop {
+        tokio::select! {
+            _ = timer.tick() => {},
+            _ = changed.notified() => {},
         }
-        let rs = rs.clone();
-        let x = x.clone();
-        futs.push(tokio::spawn(async move {
-            if FramedStream::new(&host, None, CHECK_RELAY_TIMEOUT)
-                .await
-                .is_ok()
+        'snapshot: loop {
+            let (configured, health) = {
+                let relays = relays.read().unwrap();
+                (relays.configured.clone(), relays.health.clone())
+            };
+            if !last_configured
+                .as_ref()
+                .is_some_and(|last| Arc::ptr_eq(last, &configured))
             {
-                rs.lock().await.push(x);
+                first = 0;
+                last_configured = Some(configured.clone());
             }
-        }));
+            if configured.is_empty() {
+                break;
+            }
+            let probes = check_relay_servers(
+                &configured,
+                &relays,
+                &health,
+                pending_dns.clone(),
+                first,
+            );
+            tokio::pin!(probes);
+            let count = configured.len();
+            let mut deferred_offset = count;
+            loop {
+                let checked = tokio::select! {
+                    biased;
+                    _ = changed.notified() => {
+                        if !Arc::ptr_eq(&relays.read().unwrap().configured, &configured) {
+                            continue 'snapshot;
+                        }
+                        continue;
+                    },
+                    checked = probes.next() => checked,
+                };
+                let Some((indices, probe)) = checked else {
+                    break;
+                };
+                if matches!(probe, RelayProbe::Deferred) {
+                    if let Some(index) = indices.first() {
+                        deferred_offset = deferred_offset.min((index + count - first) % count);
+                    }
+                    continue;
+                }
+                let mut relays = relays.write().unwrap();
+                if Arc::ptr_eq(&relays.configured, &configured) {
+                    for index in indices {
+                        relays.record_probe(index, probe);
+                    }
+                }
+            }
+            first = if deferred_offset == count {
+                0
+            } else {
+                (first + deferred_offset) % count
+            };
+            break;
+        }
     }
-    join_all(futs).await;
-    log::debug!("check_relay_servers");
-    let rs = std::mem::take(&mut *rs.lock().await);
-    if !rs.is_empty() {
-        tx.send(Data::RelayServers(rs)).ok();
+}
+
+fn relay_probe_endpoint(address: &str) -> String {
+    let address = if address.contains(':') {
+        address.to_ascii_lowercase()
+    } else {
+        format!("{}:{}", address.to_ascii_lowercase(), config::RELAY_PORT)
+    };
+    address
+        .parse::<SocketAddr>()
+        .map_or(address, |socket| socket.to_string())
+}
+
+fn check_relay_servers<'a>(
+    configured: &'a Arc<RelayServers>,
+    relays: &'a RwLock<RelayState>,
+    health: &'a [RelayHealth],
+    pending_dns: Arc<StdMutex<RelayDns>>,
+    first: usize,
+) -> impl hbb_common::futures_util::Stream<Item = (Vec<usize>, RelayProbe)> + 'a {
+    use std::net::ToSocketAddrs;
+
+    let mut grouped: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut positions: HashMap<String, usize> = HashMap::new();
+    for offset in 0..configured.len() {
+        let index = (first + offset) % configured.len();
+        let endpoint = relay_probe_endpoint(&configured[index]);
+        let position = *positions.entry(endpoint.clone()).or_insert(grouped.len());
+        if let Some((_, indices)) = grouped.get_mut(position) {
+            indices.push(index);
+        } else {
+            grouped.push((endpoint, vec![index]));
+        }
+    }
+    // Give each name a probe slot before assigning more slots to its other ports.
+    let mut ports_per_name = HashMap::<String, usize>::new();
+    let mut groups: Vec<_> = grouped
+        .into_iter()
+        .filter_map(|(host, indices)| {
+            if let Ok(socket) = host.parse() {
+                Some((0, RelayEndpoint::Socket(socket), indices))
+            } else {
+                let (name, port) = host.rsplit_once(':')?;
+                let port = port.parse().ok()?;
+                let count = ports_per_name.entry(name.to_owned()).or_default();
+                *count += 1;
+                Some((
+                    *count - 1,
+                    RelayEndpoint::Host(name.to_owned(), port),
+                    indices,
+                ))
+            }
+        })
+        .collect();
+    groups.sort_by_key(|(rank, _, _)| *rank);
+    let batch_dns = Arc::new(StdMutex::new(RelayDns::new()));
+    stream::iter(groups)
+        .map(move |(_, endpoint, indices)| {
+            let health = health[indices[0]];
+            let preferred = health
+                .last_reply
+                .filter(|reply| reply.failures <= 1)
+                .map(|reply| reply.socket);
+            let batch_dns = batch_dns.clone();
+            let pending_dns = pending_dns.clone();
+            async move {
+                let deadline =
+                    tokio::time::Instant::now() + Duration::from_millis(CHECK_RELAY_TIMEOUT);
+                let mut candidates = match endpoint {
+                    RelayEndpoint::Socket(socket) => vec![socket],
+                    RelayEndpoint::Host(name, port) => {
+                        let (dns_deadline, mut result) = {
+                            // Only the active configuration can reserve a DNS slot.
+                            let current = relays.read().unwrap();
+                            if !Arc::ptr_eq(&current.configured, configured) {
+                                return (indices, RelayProbe::Deferred);
+                            }
+                            let mut batch = batch_dns.lock().unwrap();
+                            if let Some(lookup) = batch.get(&name) {
+                                lookup.clone()
+                            } else {
+                                let mut pending = pending_dns.lock().unwrap();
+                                let lookup = if let Some(lookup) = pending.get(&name) {
+                                    // Configuration changes reuse the original DNS deadline.
+                                    lookup.clone()
+                                } else {
+                                    if pending.len() >= CHECK_RELAY_CONCURRENCY {
+                                        return (indices, RelayProbe::Deferred);
+                                    }
+                                    let (send, result) = watch::channel(Vec::new());
+                                    let lookup = (deadline, result);
+                                    pending.insert(name.clone(), lookup.clone());
+                                    let worker_name = name.clone();
+                                    let pending_dns = pending_dns.clone();
+                                    tokio::task::spawn_blocking(move || {
+                                        let mut addresses = (worker_name.as_str(), 0)
+                                            .to_socket_addrs()
+                                            .map(|addresses| addresses.collect::<Vec<_>>())
+                                            .unwrap_or_default();
+                                        addresses.sort_unstable();
+                                        addresses.dedup();
+                                        let _ = send.send(addresses);
+                                        pending_dns.lock().unwrap().remove(&worker_name);
+                                    });
+                                    lookup
+                                };
+                                batch.insert(name, lookup.clone());
+                                lookup
+                            }
+                        };
+                        if !matches!(
+                            tokio::time::timeout_at(dns_deadline, result.changed()).await,
+                            Ok(Ok(()))
+                        ) {
+                            return (indices, RelayProbe::Unresolved);
+                        }
+                        let mut addresses = result.borrow().clone();
+                        for address in &mut addresses {
+                            address.set_port(port);
+                        }
+                        addresses
+                    }
+                };
+                if !candidates.is_empty() {
+                    let offset = health.next_candidate % candidates.len();
+                    candidates.rotate_left(offset);
+                }
+                // Prefer the last responder until repeated failures require rotating again.
+                if let Some(position) = candidates
+                    .iter()
+                    .position(|&socket| Some(socket) == preferred)
+                {
+                    candidates[..=position].rotate_right(1);
+                }
+                let probe = connect_relay_candidates(candidates, deadline).await;
+                (indices, probe)
+            }
+        })
+        .buffer_unordered(CHECK_RELAY_CONCURRENCY)
+}
+
+async fn connect_relay_candidates(
+    candidates: Vec<SocketAddr>,
+    deadline: tokio::time::Instant,
+) -> RelayProbe {
+    let count = candidates.len();
+    let waves = candidates
+        .len()
+        .saturating_sub(1)
+        .div_ceil(RELAY_CANDIDATE_CONCURRENCY - 1);
+    let mut candidates = candidates.into_iter().enumerate();
+    let mut pending = FuturesUnordered::new();
+    let mut active: VecDeque<(usize, tokio::time::Instant, AbortHandle)> = VecDeque::new();
+    let attempt_delay = |now, waiting: usize| {
+        RELAY_CANDIDATE_DELAY.min(deadline.saturating_duration_since(now) / (waiting as u32 + 1))
+    };
+    let now = tokio::time::Instant::now();
+    let slot_budget = deadline.saturating_duration_since(now) / (waves as u32 + 1);
+    let mut next_attempt = now;
+    while candidates.len() > 0 || !pending.is_empty() {
+        let oldest = active
+            .iter()
+            .find(|(index, _, _)| *index != 0)
+            .filter(|_| active.len() == RELAY_CANDIDATE_CONCURRENCY);
+        let next = oldest.map_or(next_attempt, |(_, started, _)| next_attempt.max(*started + slot_budget));
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep_until(deadline) => break,
+            Some((index, socket, result)) = pending.next(), if !pending.is_empty() => {
+                if matches!(result, Ok(Ok(_))) {
+                    return RelayProbe::Reachable(socket);
+                }
+                active.retain(|(active_index, _, _)| *active_index != index);
+                if pending.is_empty() {
+                    next_attempt = tokio::time::Instant::now();
+                }
+            },
+            _ = tokio::time::sleep_until(next), if candidates.len() > 0 => {
+                if let Some((_, _, abort)) = oldest {
+                    // Give the first candidate the full budget and rotate the remaining slots when busy.
+                    abort.abort();
+                } else if let Some((index, candidate)) = candidates.next() {
+                    let now = tokio::time::Instant::now();
+                    let (abort, registration) = AbortHandle::new_pair();
+                    active.push_back((index, now, abort));
+                    pending.push(async move {
+                        let result = Abortable::new(TcpStream::connect(candidate), registration).await;
+                        (index, candidate, result)
+                    });
+                    next_attempt = now + attempt_delay(now, candidates.len());
+                }
+            },
+        }
+    }
+    if candidates.len() < count {
+        RelayProbe::Failed
+    } else {
+        RelayProbe::Unresolved
     }
 }
 

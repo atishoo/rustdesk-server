@@ -71,6 +71,26 @@ pub async fn accept_or_pending(
     }
 }
 
+pub(crate) async fn read_console_command(
+    stream: &mut tokio::net::TcpStream,
+) -> Option<Result<String, &'static str>> {
+    use tokio::io::AsyncReadExt;
+
+    const MAX_BYTES: usize = 64 * 1024;
+    let mut command = Vec::new();
+    let mut reader = (&mut *stream).take(MAX_BYTES as u64 + 1);
+    match hbb_common::timeout(1000, reader.read_to_end(&mut command)).await {
+        Ok(Ok(_)) if command.len() > MAX_BYTES => {
+            // Drain a bounded amount of time before replying so unread bytes do not reset TCP.
+            let _ = hbb_common::timeout(1000, tokio::io::copy(stream, &mut tokio::io::sink())).await;
+            Some(Err("console command is too long"))
+        }
+        Ok(Ok(_)) => Some(String::from_utf8(command).map_err(|_| "console command is not UTF-8")),
+        Ok(Err(_)) => None,
+        Err(_) => Some(Err("console command read timed out")),
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) fn get_expired_time() -> Instant {
     let now = Instant::now();

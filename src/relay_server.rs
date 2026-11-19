@@ -12,17 +12,18 @@ use hbb_common::{
     timeout,
     tokio::{
         self,
-        io::{AsyncReadExt, AsyncWriteExt},
+        io::AsyncWriteExt,
         net::{TcpListener, TcpStream},
         sync::{Mutex, RwLock},
         time::{interval, Duration},
     },
     ResultType,
 };
+#[cfg(test)]
+use hbb_common::tokio::io::AsyncReadExt;
 use sodiumoxide::crypto::sign;
 use std::{
     collections::{HashMap, HashSet},
-    io::prelude::*,
     io::Error,
     net::{IpAddr, SocketAddr},
     sync::atomic::{AtomicUsize, Ordering},
@@ -55,6 +56,17 @@ const WS_DEFAULT_MAX_FRAME_SIZE: usize = 16 << 20;
 const BLACKLIST_FILE: &str = "blacklist.txt";
 const BLOCKLIST_FILE: &str = "blocklist.txt";
 
+fn canonical_list_ip(value: &str) -> Option<String> {
+    value
+        .parse::<IpAddr>()
+        .ok()
+        .map(|ip| relay_list_key(SocketAddr::new(ip, 0)))
+}
+
+fn relay_list_key(addr: SocketAddr) -> String {
+    hbb_common::try_into_v4(addr).ip().to_string()
+}
+
 #[tokio::main(flavor = "multi_thread")]
 pub async fn start_with_bind(
     bind_addr: Option<IpAddr>,
@@ -62,36 +74,15 @@ pub async fn start_with_bind(
     key: &str,
 ) -> ResultType<()> {
     let key = get_server_sk(key)?;
-    if let Ok(mut file) = std::fs::File::open(BLACKLIST_FILE) {
-        let mut contents = String::new();
-        if file.read_to_string(&mut contents).is_ok() {
-            for x in contents.split('\n') {
-                if let Some(ip) = x.trim().split(' ').next() {
-                    BLACKLIST.write().await.insert(ip.to_owned());
-                }
-            }
+    for (path, list) in [(BLACKLIST_FILE, &*BLACKLIST), (BLOCKLIST_FILE, &*BLOCKLIST)] {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            let addresses = contents.lines().filter_map(|line| {
+                line.split_whitespace().next().and_then(canonical_list_ip)
+            });
+            list.write().await.extend(addresses);
         }
+        log::info!("List {path}: {} addresses", list.read().await.len());
     }
-    log::info!(
-        "#blacklist({}): {}",
-        BLACKLIST_FILE,
-        BLACKLIST.read().await.len()
-    );
-    if let Ok(mut file) = std::fs::File::open(BLOCKLIST_FILE) {
-        let mut contents = String::new();
-        if file.read_to_string(&mut contents).is_ok() {
-            for x in contents.split('\n') {
-                if let Some(ip) = x.trim().split(' ').next() {
-                    BLOCKLIST.write().await.insert(ip.to_owned());
-                }
-            }
-        }
-    }
-    log::info!(
-        "#blocklist({}): {}",
-        BLOCKLIST_FILE,
-        BLOCKLIST.read().await.len()
-    );
     let port: u16 = port.parse()?;
     log::info!("Listening on tcp :{}", port);
     let port2 = port + 2;
@@ -192,56 +183,58 @@ async fn check_cmd(cmd: &str, limiter: Limiter) -> String {
                 "usage(u)"
             )
         }
-        Some("blacklist-add" | "ba") => {
-            if let Some(ip) = fds.next() {
-                for ip in ip.split('|') {
-                    BLACKLIST.write().await.insert(ip.to_owned());
-                }
-            }
-        }
-        Some("blacklist-remove" | "br") => {
-            if let Some(ip) = fds.next() {
-                if ip == "all" {
-                    BLACKLIST.write().await.clear();
-                } else {
-                    for ip in ip.split('|') {
-                        BLACKLIST.write().await.remove(ip);
-                    }
-                }
-            }
-        }
-        Some("blacklist" | "b") => {
-            if let Some(ip) = fds.next() {
-                res = format!("{}\n", BLACKLIST.read().await.get(ip).is_some());
+        Some(
+            name @ ("blacklist-add" | "ba" | "blocklist-add" | "Ba" | "blacklist-remove" | "br"
+            | "blocklist-remove" | "Br"),
+        ) => {
+            let (list, remove) = match name {
+                "blacklist-add" | "ba" => (&*BLACKLIST, false),
+                "blacklist-remove" | "br" => (&*BLACKLIST, true),
+                "blocklist-add" | "Ba" => (&*BLOCKLIST, false),
+                _ => (&*BLOCKLIST, true),
+            };
+            let Some(option) = fds.next() else {
+                return "Error: IP address required\n".to_owned();
+            };
+            if remove && option == "all" && fds.next().is_none() {
+                list.write().await.clear();
             } else {
-                for ip in BLACKLIST.read().await.clone().into_iter() {
-                    let _ = writeln!(res, "{ip}");
+                let Some(addresses) = option
+                    .split('|')
+                    .map(canonical_list_ip)
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    return "Error: Invalid IP address\n".to_owned();
+                };
+                if fds.next().is_some() {
+                    return "Error: Invalid IP address\n".to_owned();
                 }
-            }
-        }
-        Some("blocklist-add" | "Ba") => {
-            if let Some(ip) = fds.next() {
-                for ip in ip.split('|') {
-                    BLOCKLIST.write().await.insert(ip.to_owned());
-                }
-            }
-        }
-        Some("blocklist-remove" | "Br") => {
-            if let Some(ip) = fds.next() {
-                if ip == "all" {
-                    BLOCKLIST.write().await.clear();
-                } else {
-                    for ip in ip.split('|') {
-                        BLOCKLIST.write().await.remove(ip);
+                let mut list = list.write().await;
+                if remove {
+                    for address in addresses {
+                        list.remove(&address);
                     }
+                } else {
+                    list.extend(addresses);
                 }
             }
         }
-        Some("blocklist" | "B") => {
-            if let Some(ip) = fds.next() {
-                res = format!("{}\n", BLOCKLIST.read().await.get(ip).is_some());
+        Some(name @ ("blacklist" | "b" | "blocklist" | "B")) => {
+            let list = if matches!(name, "blacklist" | "b") {
+                &*BLACKLIST
             } else {
-                for ip in BLOCKLIST.read().await.clone().into_iter() {
+                &*BLOCKLIST
+            };
+            if let Some(ip) = fds.next() {
+                let Some(ip) = canonical_list_ip(ip) else {
+                    return "Error: Invalid IP address\n".to_owned();
+                };
+                if fds.next().is_some() {
+                    return "Error: Invalid IP address\n".to_owned();
+                }
+                res = format!("{}\n", list.read().await.contains(&ip));
+            } else {
+                for ip in list.read().await.iter() {
                     let _ = writeln!(res, "{ip}");
                 }
             }
@@ -406,25 +399,24 @@ async fn handle_connection(
         let limiter = limiter.clone();
         tokio::spawn(async move {
             let mut stream = stream;
-            let mut buffer = [0; 1024];
-            if let Ok(Ok(n)) = timeout(1000, stream.read(&mut buffer[..])).await {
-                if let Ok(data) = std::str::from_utf8(&buffer[..n]) {
-                    let res = check_cmd(data, limiter).await;
-                    if let Err(err) = timeout(1000, stream.write_all(res.as_bytes()))
-                        .await
-                        .unwrap_or_else(|elapsed| Err(elapsed.into()))
-                    {
-                        log::warn!("Failed to send the console reply: {err}");
-                    }
-                }
+            let Some(command) = crate::common::read_console_command(&mut stream).await else {
+                return;
+            };
+            let reply = match command {
+                Ok(command) => check_cmd(&command, limiter).await,
+                Err(error) => format!("Error: {error}\n"),
+            };
+            if let Err(err) = timeout(1000, stream.write_all(reply.as_bytes()))
+                .await
+                .unwrap_or_else(|elapsed| Err(elapsed.into()))
+            {
+                log::warn!("Failed to send the console reply: {err}");
             }
         });
         return;
     }
     let ip = ip.to_string();
-    let reported = addr.ip().to_string();
-    let listed = |list: &HashSet<String>| list.contains(&ip) || list.contains(&reported);
-    if listed(&*BLOCKLIST.read().await) {
+    if BLOCKLIST.read().await.contains(&ip) {
         log::info!("{} blocked", ip);
         return;
     }
@@ -546,10 +538,7 @@ async fn relay(
     total_limiter: Limiter,
     id: String,
 ) -> ResultType<()> {
-    let ip = addr.ip().to_string();
-    // The dual-stack listener reports an IPv4 client as ::ffff:a.b.c.d; lists may hold either form.
-    let unmapped = hbb_common::try_into_v4(addr).ip().to_string();
-    let listed = |list: &HashSet<String>| list.contains(&ip) || list.contains(&unmapped);
+    let ip = relay_list_key(addr);
     let mut tm = std::time::Instant::now();
     let mut elapsed = 0;
     let mut total = 0;
@@ -613,11 +602,11 @@ async fn relay(
 
         let n = tm.elapsed().as_millis() as usize;
         if n >= 1_000 {
-            if listed(&*BLOCKLIST.read().await) {
+            if BLOCKLIST.read().await.contains(&ip) {
                 log::info!("{} blocked", ip);
                 break;
             }
-            blacked = listed(&*BLACKLIST.read().await);
+            blacked = BLACKLIST.read().await.contains(&ip);
             tm = std::time::Instant::now();
             let speed = total_s / n;
             if speed > highest_s {
@@ -701,14 +690,17 @@ mod tests {
 
     #[tokio::test]
     async fn only_a_blocklisted_ipv4_client_on_the_dual_stack_listener_is_cut_off() {
-        // The plain form is what `ba` is usually given; the mapped one is what `usage` shows.
         // A client not listed must outlive the first list check, which runs at 3 s.
+        let limiter = Limiter::new(1_000_000.);
         for (entry, client, cut_off) in [
             ("192.0.2.55", "[::ffff:192.0.2.55]:1", true),
-            ("::ffff:192.0.2.55", "[::ffff:192.0.2.55]:1", true),
+            ("::ffff:192.0.2.55", "[::192.0.2.55]:1", true),
             ("192.0.2.55", "[::ffff:192.0.2.56]:1", false),
         ] {
-            BLOCKLIST.write().await.insert(entry.to_owned());
+            check_cmd(&format!("Ba {entry}"), limiter.clone()).await;
+            let client_ip = client.parse::<SocketAddr>().unwrap().ip();
+            let listed = check_cmd(&format!("B {client_ip}"), limiter.clone()).await;
+            assert_eq!(listed.trim(), cut_off.to_string());
             let mut stream = TestStream {
                 data: None,
                 blocked: false,
@@ -723,12 +715,12 @@ mod tests {
                     client.parse().unwrap(),
                     &mut stream,
                     &mut peer,
-                    Limiter::new(1_000_000.),
+                    limiter.clone(),
                     "blocklist-test".to_owned(),
                 ),
             )
             .await;
-            BLOCKLIST.write().await.remove(entry);
+            check_cmd(&format!("Br {entry}"), limiter.clone()).await;
             assert!(
                 matches!((cut_off, &result), (true, Ok(Ok(()))) | (false, Err(_))),
                 "client {client}, blocklist entry {entry}: {result:?}"
@@ -739,19 +731,20 @@ mod tests {
     #[tokio::test]
     async fn a_client_blocklisted_in_either_form_is_refused_at_accept() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let limiter = Limiter::new(1_000_000.);
         for (entry, refused) in [
             ("192.0.2.57", true),
             ("::ffff:192.0.2.57", true),
             ("192.0.2.58", false),
         ] {
-            BLOCKLIST.write().await.insert(entry.to_owned());
+            check_cmd(&format!("Ba {entry}"), limiter.clone()).await;
             let mut client = TcpStream::connect(listener.local_addr().unwrap())
                 .await
                 .unwrap();
             let (stream, _) = listener.accept().await.unwrap();
             let addr = "[::ffff:192.0.2.57]:1".parse().unwrap();
-            handle_connection(stream, addr, &Limiter::new(1_000_000.), "", false).await;
-            BLOCKLIST.write().await.remove(entry);
+            handle_connection(stream, addr, &limiter, "", false).await;
+            check_cmd(&format!("Br {entry}"), limiter.clone()).await;
             let read = timeout(1_000, client.read(&mut [0; 1])).await;
             assert!(
                 matches!((refused, &read), (true, Ok(Ok(0))) | (false, Err(_))),
