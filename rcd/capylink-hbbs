@@ -1,0 +1,68 @@
+#!/bin/sh
+
+# PROVIDE: capylink_hbbs
+# REQUIRE: LOGIN
+# KEYWORD: shutdown
+#
+# Add the following lines to /etc/rc.conf.local or /etc/rc.conf
+# to enable this service:
+#
+# capylink_hbbs_enable (bool):            Set to NO by default.
+#               Set it to YES to enable capylink_hbbs.
+# capylink_hbbs_ip (string):              Set IP address/hostname of relay server to use
+#               Defaults to "127.0.0.1", please replace with your server hostname/IP.
+# capylink_hbbs_args (string):            Set extra arguments to pass to capylink_hbbs
+#               Default is "-r ${capylink_hbbs_ip} -k _".
+# capylink_hbbs_user (string):            Set user that capylink_hbbs will run under
+#               Default is "root".
+# capylink_hbbs_group (string):           Set group that capylink_hbbs will run under
+#               Default is "wheel".
+
+. /etc/rc.subr
+
+name=capylink_hbbs
+desc="capylink ID/Rendezvous Server"
+rcvar=capylink_hbbs_enable
+
+load_rc_config $name
+
+: ${capylink_hbbs_enable:=NO}
+: ${capylink_hbbs_ip:=127.0.0.1}
+: ${capylink_hbbs_args="-r ${capylink_hbbs_ip} -k _"}
+: ${capylink_hbbs_user:=capylink}
+: ${capylink_hbbs_group:=capylink}
+
+pidfile=/var/run/capylink_hbbs.pid
+command=/usr/sbin/daemon
+procname=/usr/local/sbin/hbbs
+capylink_hbbs_chdir=/var/db/capylink-server
+command_args="-p ${pidfile} -o /var/log/capylink-hbbs.log ${procname} ${capylink_hbbs_args}"
+## If you want the daemon to do its log over syslog, comment out the above line and remove the comment from the below replacement
+#command_args="-p ${pidfile} -T ${name} ${procname} ${capylink_hbbs_args}"
+
+start_precmd=capylink_hbbs_startprecmd
+
+capylink_hbbs_startprecmd()
+{
+    if [ -e ${pidfile} ]; then
+        chown ${capylink_hbbs_user}:${capylink_hbbs_group} ${pidfile};
+    else
+        install -o ${capylink_hbbs_user} -g ${capylink_hbbs_group} /dev/null ${pidfile};
+    fi
+    if [ -e ${capylink_hbbs_chdir} ]; then
+        chown -R ${capylink_hbbs_user}:${capylink_hbbs_group} ${capylink_hbbs_chdir};
+        chmod -R 770 ${capylink_hbbs_chdir};
+    else
+        mkdir -m 770 ${capylink_hbbs_chdir};
+        chown ${capylink_hbbs_user}:${capylink_hbbs_group} ${capylink_hbbs_chdir};
+    fi
+    if [ -e /var/log/capylink-hbbs.log ]; then
+        chown -R ${capylink_hbbs_user}:${capylink_hbbs_group} /var/log/capylink-hbbs.log;
+        chmod 660 /var/log/capylink-hbbs.log;
+    else
+        install -o ${capylink_hbbs_user} -g ${capylink_hbbs_group} /dev/null /var/log/capylink-hbbs.log;
+        chmod 660 /var/log/capylink-hbbs.log;
+    fi
+}
+
+run_rc_command "$1"

@@ -1,0 +1,65 @@
+#!/bin/sh
+
+# PROVIDE: capylink_hbbr
+# REQUIRE: LOGIN
+# KEYWORD: shutdown
+#
+# Add the following lines to /etc/rc.conf.local or /etc/rc.conf
+# to enable this service:
+#
+# capylink_hbbr_enable (bool):            Set to NO by default.
+#               Set it to YES to enable capylink_hbbr.
+# capylink_hbbr_args (string):            Set extra arguments to pass to capylink_hbbr
+#               Default is "-k _".
+# capylink_hbbr_user (string):            Set user that capylink_hbbr will run under
+#               Default is "root".
+# capylink_hbbr_group (string):           Set group that capylink_hbbr will run under
+#               Default is "wheel".
+
+. /etc/rc.subr
+
+name=capylink_hbbr
+desc="capylink Relay Server"
+rcvar=capylink_hbbr_enable
+
+load_rc_config $name
+
+: ${capylink_hbbr_enable:=NO}
+: ${capylink_hbbr_args="-k _"}
+: ${capylink_hbbr_user:=capylink}
+: ${capylink_hbbr_group:=capylink}
+
+pidfile=/var/run/capylink_hbbr.pid
+command=/usr/sbin/daemon
+procname=/usr/local/sbin/hbbr
+capylink_hbbr_chdir=/var/db/capylink-server
+command_args="-p ${pidfile} -o /var/log/capylink-hbbr.log ${procname} ${capylink_hbbr_args}"
+## If you want the daemon do its log over syslog comment out the above line and remove the comment from the below replacement
+#command_args="-p ${pidfile} -T ${name} ${procname} ${capylink_hbbr_args}"
+
+start_precmd=capylink_hbbr_startprecmd
+
+capylink_hbbr_startprecmd()
+{
+    if [ -e ${pidfile} ]; then
+        chown ${capylink_hbbr_user}:${capylink_hbbr_group} ${pidfile};
+    else
+        install -o ${capylink_hbbr_user} -g ${capylink_hbbr_group} /dev/null ${pidfile};
+    fi
+    if [ -e ${capylink_hbbr_chdir} ]; then
+        chown -R ${capylink_hbbr_user}:${capylink_hbbr_group} ${capylink_hbbr_chdir};
+        chmod -R 770 ${capylink_hbbr_chdir};
+    else
+        mkdir -m 770 ${capylink_hbbr_chdir};
+        chown ${capylink_hbbr_user}:${capylink_hbbr_group} ${capylink_hbbr_chdir};
+    fi
+    if [ -e /var/log/capylink-hbbr.log ]; then
+        chown -R ${capylink_hbbr_user}:${capylink_hbbr_group} /var/log/capylink-hbbr.log;
+        chmod 660 /var/log/capylink-hbbr.log;
+    else
+        install -o ${capylink_hbbr_user} -g ${capylink_hbbr_group} /dev/null /var/log/capylink-hbbr.log;
+        chmod 660 /var/log/capylink-hbbr.log;
+    fi
+}
+
+run_rc_command "$1"

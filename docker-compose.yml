@@ -1,7 +1,7 @@
 version: '3'
 
 networks:
-  rustdesk-net:
+  capylink-net:
     external: false
 
 services:
@@ -12,16 +12,16 @@ services:
       - 21116:21116
       - 21116:21116/udp
       - 21118:21118
-    image: ${RUSTDESK_SERVER_IMAGE:-ghcr.io/atishoo/rustdesk-server:ultrapro}
-    command: hbbs -r ${RUSTDESK_RELAY:-hbbr:21117}
+    image: ${CAPYLINK_SERVER_IMAGE:-ghcr.io/atishoo/capylink-server:ultrapro}
+    command: hbbs -r ${CAPYLINK_RELAY:-hbbr:21117}
     environment:
       ENABLE_TCP_REGISTER: ${ENABLE_TCP_REGISTER:-Y}
       MUST_LOGIN: ${MUST_LOGIN:-N}
-      RUSTDESK_API_JWT_KEY: ${RUSTDESK_API_JWT_KEY:-}
+      CAPYLINK_API_JWT_KEY: ${CAPYLINK_API_JWT_KEY:-}
     volumes:
       - ./data:/root
     networks:
-      - rustdesk-net
+      - capylink-net
     depends_on:
       - hbbr
     restart: unless-stopped
@@ -31,10 +31,10 @@ services:
     ports:
       - 21117:21117
       - 21119:21119
-    image: ${RUSTDESK_SERVER_IMAGE:-ghcr.io/atishoo/rustdesk-server:ultrapro}
+    image: ${CAPYLINK_SERVER_IMAGE:-ghcr.io/atishoo/capylink-server:ultrapro}
     command: hbbr
     volumes:
       - ./data:/root
     networks:
-      - rustdesk-net
+      - capylink-net
     restart: unless-stopped

@@ -1,7 +1,7 @@
 # Configuration & Environment Variables
 
 This document is the single reference for every option that the open‑source
-RustDesk server binaries (`hbbs`, `hbbr`) understand: command‑line flags,
+capylink server binaries (`hbbs`, `hbbr`) understand: command‑line flags,
 environment variables, and configuration files.
 
 > **TL;DR** — For most people the command‑line flags shown by `hbbs --help` /
@@ -46,8 +46,8 @@ in the inherited process environment.
 | *(config file)* | `-c`, `--config` | *(none)* | Path to an extra INI config file (see precedence above). |
 | `TEST_HBBS` 🅴 | *(none)* | *(auto)* | UDP self‑test target checked at start‑up. Set to `no` to skip the check (useful behind some NATs/proxies), or to an explicit `host:port`. |
 | `ALWAYS_USE_RELAY` 🅴 | *(none)* | `N` | `Y` forces every session through a relay (disables direct/hole‑punched connections). At runtime, send `always-use-relay Y` or `always-use-relay N` to the `hbbs` [loopback console](#runtime-console). |
-| `MUST_LOGIN` 🅴 | `--must-login=Y|N` | `N` | `Y` requires a non-empty client login token before a punch-hole request is accepted. If `RUSTDESK_API_JWT_KEY` is set, the token must also be a valid API JWT. At runtime, send `must-login Y` or `must-login N` to the `hbbs` loopback console. |
-| `RUSTDESK_API_JWT_KEY` 🅴 | *(none)* | *(empty)* | Shared HS256 secret used to validate login tokens when `MUST_LOGIN=Y`. Leave empty when the API does not issue JWT tokens. |
+| `MUST_LOGIN` 🅴 | `--must-login=Y|N` | `N` | `Y` requires a non-empty client login token before a punch-hole request is accepted. If `CAPYLINK_API_JWT_KEY` is set, the token must also be a valid API JWT. At runtime, send `must-login Y` or `must-login N` to the `hbbs` loopback console. |
+| `CAPYLINK_API_JWT_KEY` 🅴 | *(none)* | *(empty)* | Shared HS256 secret used to validate login tokens when `MUST_LOGIN=Y`. Leave empty when the API does not issue JWT tokens. |
 | `ENABLE_TCP_REGISTER` 🅴 | *(none)* | `N` | `Y` enables persistent TCP peer registration and lets UltraPro route punch-hole requests through the registered TCP channel when UDP is unavailable. |
 | `DB_URL` 🅴 | *(none)* | `./db_v2.sqlite3` | Path/URL of the SQLite database file. See [Database](#database). |
 | `MAX_DATABASE_CONNECTIONS` 🅴 | *(none)* | `1` | Size of the SQLite connection pool. |
@@ -245,7 +245,7 @@ binaries and does **not** implement `RELAY`, `ENCRYPTED_ONLY`, `KEY_PUB`, or
 
 ```bash
 # Tell clients where the relay listens because it is not using port 21117.
-hbbs -p 22116 -r rustdesk.example.com:22117
+hbbs -p 22116 -r capylink.example.com:22117
 hbbr -p 22117
 ```
 
@@ -253,7 +253,7 @@ hbbr -p 22117
 
 ```ini
 # Non-standard ports shared by both binaries; hbbr listens on PORT+1.
-relay-servers=rustdesk.example.com:22117
+relay-servers=capylink.example.com:22117
 PORT=22116
 ```
 
@@ -261,10 +261,10 @@ PORT=22116
 
 ```yaml
 services:
-  rustdesk-server:
+  capylink-server:
     image: rustdesk/rustdesk-server-s6:latest
     environment:
-      - RELAY=rustdesk.example.com:21117
+      - RELAY=capylink.example.com:21117
       - ALWAYS_USE_RELAY=Y
       - RUST_LOG=info
       - SINGLE_BANDWIDTH=256

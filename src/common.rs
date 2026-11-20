@@ -455,7 +455,7 @@ pub fn check_software_update() {
 
 #[tokio::main(flavor = "current_thread")]
 async fn check_software_update_() -> hbb_common::ResultType<()> {
-    let (request, url) = hbb_common::version_check_request(hbb_common::VER_TYPE_RUSTDESK_SERVER.to_string());
+    let (request, url) = hbb_common::version_check_request(hbb_common::VER_TYPE_CAPYLINK_SERVER.to_string());
     let latest_release_response = reqwest::Client::builder().build()?
         .post(url)
         .json(&request)
@@ -480,30 +480,30 @@ mod tests {
     #[test]
     fn argument_names_ignore_case_and_separator() {
         let aliases = [
-            "RUSTDESK-CONFIG-ALIAS-TEST",
-            "RUSTDESK_CONFIG_ALIAS_TEST",
-            "rustdesk-config-alias-test",
-            "rustdesk_config_alias_test",
-            "RustDesk_Config-Alias_Test",
+            "CAPYLINK-CONFIG-ALIAS-TEST",
+            "CAPYLINK_CONFIG_ALIAS_TEST",
+            "capylink-config-alias-test",
+            "capylink_config_alias_test",
+            "CapyLink_Config-Alias_Test",
         ];
         for alias in aliases {
             std::env::remove_var(alias);
         }
         for alias in aliases {
             std::env::set_var(alias, alias);
-            assert_eq!(get_arg("RUSTDESK_CONFIG_ALIAS_TEST"), alias);
+            assert_eq!(get_arg("CAPYLINK_CONFIG_ALIAS_TEST"), alias);
             std::env::remove_var(alias);
         }
-        set_arg("rustdesk_config_alias_test", "normalized");
+        set_arg("capylink_config_alias_test", "normalized");
         assert_eq!(
-            std::env::var("RUSTDESK-CONFIG-ALIAS-TEST").unwrap(),
+            std::env::var("CAPYLINK-CONFIG-ALIAS-TEST").unwrap(),
             "normalized"
         );
-        std::env::set_var("RUSTDESK_CONFIG_ALIAS_TEST", "inherited");
-        set_arg("rustdesk-config-alias-test", "higher-priority");
-        assert_eq!(get_arg("rustdesk_config_alias_test"), "higher-priority");
-        std::env::remove_var("RUSTDESK-CONFIG-ALIAS-TEST");
-        std::env::remove_var("RUSTDESK_CONFIG_ALIAS_TEST");
+        std::env::set_var("CAPYLINK_CONFIG_ALIAS_TEST", "inherited");
+        set_arg("capylink-config-alias-test", "higher-priority");
+        assert_eq!(get_arg("capylink_config_alias_test"), "higher-priority");
+        std::env::remove_var("CAPYLINK-CONFIG-ALIAS-TEST");
+        std::env::remove_var("CAPYLINK_CONFIG_ALIAS_TEST");
     }
 
     #[test]
@@ -595,7 +595,7 @@ mod tests {
     fn private_key_file_permissions() {
         use std::process::Command;
 
-        const CHILD_ENV: &str = "RUSTDESK_PRIVATE_KEY_TEST_CHILD";
+        const CHILD_ENV: &str = "CAPYLINK_PRIVATE_KEY_TEST_CHILD";
         const CHILD_COMPLETED: &str = "private_key_test_child_completed";
         const TEST_NAME: &str = "common::tests::private_key_file_permissions";
         if std::env::var_os(CHILD_ENV).is_some() {

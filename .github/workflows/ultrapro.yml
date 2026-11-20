@@ -12,7 +12,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  SERVER_IMAGE: ghcr.io/${{ github.repository_owner }}/rustdesk-server
+  SERVER_IMAGE: ghcr.io/${{ github.repository_owner }}/capylink-server
 
 jobs:
   build-linux:
@@ -48,7 +48,7 @@ jobs:
           args: --locked --release --all-features --target=${{ matrix.job.target }}
 
       - name: Make binaries executable
-        run: chmod 0755 target/${{ matrix.job.target }}/release/hbbs target/${{ matrix.job.target }}/release/hbbr target/${{ matrix.job.target }}/release/rustdesk-utils
+        run: chmod 0755 target/${{ matrix.job.target }}/release/hbbs target/${{ matrix.job.target }}/release/hbbr target/${{ matrix.job.target }}/release/capylink-utils
 
       - name: Upload Linux binaries
         uses: actions/upload-artifact@v4
@@ -57,7 +57,7 @@ jobs:
           path: |
             target/${{ matrix.job.target }}/release/hbbs
             target/${{ matrix.job.target }}/release/hbbr
-            target/${{ matrix.job.target }}/release/rustdesk-utils
+            target/${{ matrix.job.target }}/release/capylink-utils
           if-no-files-found: error
 
   build-windows:
@@ -90,14 +90,14 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item target/x86_64-pc-windows-msvc/release/hbbs.exe dist/hbbs.exe
           Copy-Item target/x86_64-pc-windows-msvc/release/hbbr.exe dist/hbbr.exe
-          Copy-Item target/x86_64-pc-windows-msvc/release/rustdesk-utils.exe dist/rustdesk-utils.exe
-          Compress-Archive -Path dist/* -DestinationPath rustdesk-server-windows-x86_64-unsigned.zip -Force
+          Copy-Item target/x86_64-pc-windows-msvc/release/capylink-utils.exe dist/capylink-utils.exe
+          Compress-Archive -Path dist/* -DestinationPath capylink-server-windows-x86_64-unsigned.zip -Force
 
       - name: Upload Windows server
         uses: actions/upload-artifact@v4
         with:
-          name: rustdesk-server-windows-x86_64-unsigned
-          path: rustdesk-server-windows-x86_64-unsigned.zip
+          name: capylink-server-windows-x86_64-unsigned
+          path: capylink-server-windows-x86_64-unsigned.zip
           if-no-files-found: error
 
   package-linux:
@@ -124,13 +124,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y zip
           chmod 0755 dist/*
-          zip -j rustdesk-server-linux-${{ matrix.job.name }}.zip dist/*
+          zip -j capylink-server-linux-${{ matrix.job.name }}.zip dist/*
 
       - name: Upload Linux package
         uses: actions/upload-artifact@v4
         with:
-          name: rustdesk-server-linux-${{ matrix.job.name }}
-          path: rustdesk-server-linux-${{ matrix.job.name }}.zip
+          name: capylink-server-linux-${{ matrix.job.name }}
+          path: capylink-server-linux-${{ matrix.job.name }}.zip
           if-no-files-found: error
 
   package-debian:
@@ -174,11 +174,11 @@ jobs:
       - name: Upload Debian packages
         uses: actions/upload-artifact@v4
         with:
-          name: rustdesk-server-deb-${{ matrix.job.name }}
+          name: capylink-server-deb-${{ matrix.job.name }}
           path: |
-            debian-build/rustdesk-server-hbbr_*_${{ matrix.job.debian_platform }}.deb
-            debian-build/rustdesk-server-hbbs_*_${{ matrix.job.debian_platform }}.deb
-            debian-build/rustdesk-server-utils_*_${{ matrix.job.debian_platform }}.deb
+            debian-build/capylink-server-hbbr_*_${{ matrix.job.debian_platform }}.deb
+            debian-build/capylink-server-hbbs_*_${{ matrix.job.debian_platform }}.deb
+            debian-build/capylink-server-utils_*_${{ matrix.job.debian_platform }}.deb
           if-no-files-found: error
 
   build-container:
@@ -275,7 +275,7 @@ jobs:
       - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: rustdesk-server-*
+          pattern: capylink-server-*
           path: release
           merge-multiple: true
 
@@ -283,6 +283,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ultrapro
-          name: RustDesk UltraPro server
+          name: capylink UltraPro server
           prerelease: true
           files: release/*

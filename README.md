@@ -1,8 +1,8 @@
-# RustDesk Server Program
+# capylink Server Program
 
-[![build](https://github.com/rustdesk/rustdesk-server/actions/workflows/build.yaml/badge.svg)](https://github.com/rustdesk/rustdesk-server/actions/workflows/build.yaml)
+[![build](https://github.com/atishoo/rustdesk-server/actions/workflows/ultrapro.yml/badge.svg)](https://github.com/atishoo/rustdesk-server/actions/workflows/ultrapro.yml)
 
-[**Download**](https://github.com/rustdesk/rustdesk-server/releases)
+[**Download**](https://github.com/atishoo/rustdesk-server/releases)
 
 [**Manual**](https://rustdesk.com/docs/en/self-host/)
 
@@ -12,7 +12,7 @@
 
 [**How to migrate OSS to Pro**](https://rustdesk.com/docs/en/self-host/rustdesk-server-pro/installscript/#convert-from-open-source)
 
-Self-host your own RustDesk server, it is free and open source.
+Self-host your own capylink server, it is free and open source.
 
 > [!IMPORTANT]
 > **Need more features?** [RustDesk Server Pro](https://rustdesk.com/pricing.html) might suit you better.
@@ -27,11 +27,11 @@ cargo build --release
 
 Three executables will be generated in target/release.
 
-- hbbs - RustDesk ID/Rendezvous server
-- hbbr - RustDesk relay server
-- rustdesk-utils - RustDesk CLI utilities
+- hbbs - capylink ID/Rendezvous server
+- hbbr - capylink relay server
+- capylink-utils - capylink CLI utilities
 
-You can find updated binaries on the [Releases](https://github.com/rustdesk/rustdesk-server/releases) page.
+You can find updated binaries on the [Releases](https://github.com/atishoo/rustdesk-server/releases) page.
 
 ## Configuration
 

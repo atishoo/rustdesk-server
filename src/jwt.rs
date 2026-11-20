@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::env;
 
 pub static SECRET: Lazy<String> =
-    Lazy::new(|| env::var("RUSTDESK_API_JWT_KEY").unwrap_or_default());
+    Lazy::new(|| env::var("CAPYLINK_API_JWT_KEY").unwrap_or_default());
 
 #[derive(Debug, Deserialize)]
 pub struct Claims {
